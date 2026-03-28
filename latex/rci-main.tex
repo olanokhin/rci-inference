@@ -1,0 +1,561 @@
+\documentclass{article}
+
+% ── Packages ──────────────────────────────────────────────
+\usepackage[margin=1in]{geometry}
+\usepackage{times}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath, amssymb, mathtools}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{hyperref}
+\usepackage{natbib}
+
+\bibliographystyle{plainnat}
+
+\lstset{
+    basicstyle=\small\ttfamily,
+    backgroundcolor=\color{gray!10},
+    frame=single,
+    breaklines=true,
+    captionpos=b,
+}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue,
+}
+
+% ══════════════════════════════════════════════════════════
+
+\title{\textbf{Recursive Convergent Inference (RCI):}\\
+Bottom-Up Module Expansion via Output Convergence}
+
+\author{
+    Alex Anokhin \\
+    \textit{Independent Researcher} \\
+    \href{mailto:olanokhin@gmail.com}{olanokhin@gmail.com} \\[4pt]
+    \small Code \& Colab:
+    \href{https://github.com/olanokhin/rci-inference}
+         {github.com/olanokhin/rci-inference}
+}
+
+\date{March 2026}
+
+% ══════════════════════════════════════════════════════════
+\begin{document}
+\maketitle
+
+% ── ABSTRACT ──────────────────────────────────────────────
+\begin{abstract}
+We propose \textbf{Recursive Convergent Inference (RCI)}, an
+architectural principle for neural network inference in which the
+set of active computational modules expands monotonically from a
+minimal seed subset until empirical convergence of the model's
+next-token output distribution.
+Unlike existing adaptive computation methods that determine
+\textit{when to halt} a fixed computation, RCI determines
+\textit{when additional computation is warranted}---progressively
+incorporating additional modules based on inter-module affinities
+until output stability is reached.
+Inference terminates when a hybrid distributional stability metric
+falls below a threshold, with additional safeguards against
+premature convergence.
+Crucially, RCI requires no learned halting signal, external
+verifier, or task-complexity pre-estimator; stopping emerges
+directly from the internal stability of the model's own output
+distribution.
+As each inference process is self-contained, RCI naturally enables
+parallel multi-task execution over shared read-only weights.
+This offers a complementary perspective to existing test-time
+compute scaling by shifting from \textit{external scaling}
+(longer outputs, multiple samples, verifier-guided search) to
+\textit{internal scaling} over the active parameter subgraph.
+
+We instantiate RCI on OLMoE-1B-7B-0924---a fully open model with
+64 discrete experts.
+Empirical evaluation on reasoning benchmarks of varying difficulty
+(GSM8K, MATH, MMLU hard subsets, $n{=}150$) demonstrates that all
+pairwise difficulty comparisons are statistically significant:
+hard tasks accumulate significantly greater total KL divergence
+than easy (Mann-Whitney $U{=}1677$, $p{=}0.002$) and medium tasks
+($U{=}2106$, $p{<}0.001$), with a statistically significant
+monotonic correlation (Spearman $\rho{=}0.22$, $p{=}0.007$).
+Notably, RCI's complexity metric diverges from human-defined
+difficulty labels, suggesting it captures \textit{model-relative
+computational demand} rather than task difficulty in the abstract.
+We release a fully reproducible implementation as a Google Colab
+notebook alongside this paper.
+
+\textbf{Keywords:} adaptive inference, mixture-of-experts,
+output convergence, dynamic subgraph expansion, test-time compute,
+efficient inference
+\end{abstract}
+
+% ── 1. INTRODUCTION ───────────────────────────────────────
+\section{Introduction}
+\label{sec:intro}
+
+The computational cost of inference in large neural networks is
+conventionally fixed by architecture: a model with $L$ layers and
+$N$ parameters applies largely the same amount and structure of
+computation to every input, regardless of whether the task
+requires synthesizing multi-step reasoning chains or answering a
+simple factual query.
+This rigidity constitutes a fundamental inefficiency---a direct
+retrieval question consumes the same resources as a complex
+mathematical proof.
+
+Recent advances have pursued two complementary directions.
+\textit{External test-time scaling} allocates additional compute
+by extending token sequences or sampling multiple trajectories,
+selecting among them via process reward models or majority
+voting~\citep{snell2024scaling, muennighoff2025s1}.
+\textit{Adaptive computation} methods reduce wasted compute by
+learning early exits or layer skips from a fixed graph, as in
+Adaptive Computation Time (ACT)~\citep{graves2016act},
+Universal Transformers~\citep{dehghani2019universal},
+PonderNet~\citep{banino2021pondernet}, and
+Mixture-of-Depths~\citep{raposo2024mod}.
+Both approaches operate \textbf{top-down}: they begin with a
+maximal computational graph and learn when to stop or what to
+remove.
+The symmetric direction---beginning from a minimal active
+parameter subset and expanding it bottom-up as a function of
+task complexity---has remained comparatively underexplored.
+
+We propose \textbf{Recursive Convergent Inference (RCI)}, an
+inference principle that addresses this gap.
+Rather than fixing the active parameter set and learning when to
+halt, RCI begins from a minimal seed subset of modules and expands
+it monotonically ($M_n \subseteq M_{n+1}$) until the model's
+next-token output distribution converges.
+The stopping criterion is intrinsic: additional modules no longer
+meaningfully alter the output distribution, without relying on an
+explicit learned halting signal or external evaluator.
+
+This formulation induces several properties.
+First, computation is \textit{task-adaptive by construction}:
+simple inputs converge early over small subgraphs, while complex
+reasoning recruits progressively larger portions of the network.
+Second, each inference process is \textit{self-contained},
+operating over shared read-only weights and potentially enabling
+parallel multi-task execution.
+Third, it is \textit{estimator-free}: termination arises from the
+distributional stability of the model's own output.
+More broadly, this suggests that computation in large networks can
+be allocated dynamically at the level of parameter activation,
+rather than being fixed by architecture or governed by external
+sampling strategies.
+
+\paragraph{Contributions.} We make the following contributions:
+\begin{enumerate}
+    \item \textbf{Recursive Convergent Inference (RCI)}---a novel
+    inference principle formulating computation as monotonic
+    module-set expansion ($M_n \subseteq M_{n+1}$) until empirical
+    output convergence, providing a bottom-up counterpart to
+    existing top-down adaptive methods.
+
+    \item \textbf{Module affinity graph}---a lightweight static
+    graph derived from expert co-activation patterns in MoE models,
+    used to guide structured expansion of the active module set.
+
+    \item \textbf{Convergence stopping criterion}---a hybrid output
+    stability metric combining KL divergence, cosine similarity,
+    and output entropy over a rolling window, conditioned on a
+    Confidence Margin to mitigate false convergence without
+    external supervision.
+
+    \item \textbf{Empirical validation}---an open, reproducible
+    implementation on OLMoE-1B-7B-0924 demonstrating that the
+    computational effort required for convergence (measured via
+    cumulative KL divergence across expansion steps) scales with
+    task complexity.
+    All pairwise difficulty comparisons are statistically
+    significant across $n{=}150$ examples (50 per tier---GSM8K,
+    MATH algebra, MMLU hard subsets): hard tasks accumulate
+    significantly greater cumulative KL divergence than easy
+    tasks (Mann-Whitney $U{=}1677$, $p{=}0.002$) and medium
+    tasks ($U{=}2106$, $p{<}0.001$), with a statistically
+    significant monotonic correlation (Spearman $\rho{=}0.22$,
+    $p{=}0.007$, $n{=}150$).
+    Notably, RCI's complexity metric diverges from human-defined
+    difficulty labels, indicating model-relative computational
+    demand rather than task difficulty in the abstract.
+\end{enumerate}
+
+% ── 2. RELATED WORK ───────────────────────────────────────
+\section{Related Work}
+\label{sec:related}
+
+RCI lies at the intersection of five active research directions:
+test-time compute scaling, adaptive computation, sparse
+mixture-of-experts routing, fixed-point iterative inference, and
+graph-based computation.
+
+\paragraph{Test-time compute scaling.}
+Scaling computation at inference time has emerged as a primary
+axis for improving reasoning in large language
+models~\citep{snell2024scaling, agarwal2025art}.
+Existing approaches fall into two categories.
+\textit{Serial scaling} increases compute by extending token
+sequences (Chain-of-Thought, iterative revision).
+\textit{Parallel scaling} samples multiple output trajectories
+and selects among them via verifiers or reward models
+(Best-of-$N$, Tree Search, MCTS-based planning).
+Self-consistency~\citep{wang2022selfconsistency} samples multiple
+independent outputs and selects by majority vote.
+Simple test-time scaling~\citep{muennighoff2025s1} demonstrates
+that SFT on a small set of reasoning traces combined with budget
+forcing achieves strong scaling behaviour.
+RCI differs by scaling computation \textit{internally}---expanding
+the active parameter subgraph per forward pass without altering
+context length or requiring any external verifier.
+
+\paragraph{Adaptive computation and halting.}
+ACT~\citep{graves2016act} introduces a learned scalar halting
+probability for recurrent networks.
+The Universal Transformer~\citep{dehghani2019universal} extends
+this to transformers via weight-shared recurrent layers.
+PonderNet~\citep{banino2021pondernet} reformulates halting
+probabilistically.
+Mixture-of-Depths~\citep{raposo2024mod} learns per-token binary
+skip decisions.
+More recent work includes AdaPonderLM~\citep{adaponderlm2025} and
+ADEPT~\citep{adept2026}.
+Answer Convergence~\citep{liu2025answerconv} detects when outputs
+stabilise across reasoning steps---the closest prior use of a
+convergence signal for stopping.
+All of the above focus on \textit{halting}; RCI asks the symmetric
+question of \textit{when additional computation is warranted}.
+
+\paragraph{Mixture-of-Experts.}
+The Switch Transformer~\citep{fedus2021switch} established sparse
+MoE as a practical scaling paradigm.
+OLMoE~\citep{muennighoff2024olmoe} demonstrated that open MoE
+models with 64 experts and top-8 routing match larger dense
+counterparts.
+OpenMoE~\citep{xue2024openmoe} confirmed strong expert
+specialisation during pre-training.
+Standard and dynamic MoE methods make a single routing decision
+per forward pass.
+RCI treats the active expert set as a dynamically expanding
+frontier across recursive steps, repurposing co-activation
+statistics as a static affinity graph---a structural use of MoE
+routing information not present in prior work.
+
+\paragraph{Fixed-point and iterative inference.}
+Deep Equilibrium Models~\citep{bai2019deq} formulate inference
+as finding a fixed point of a weight-tied layer.
+Looped Transformers and recurrent-depth architectures demonstrate
+that iterating a single parameterised block can scale test-time
+computation.
+SELF-Transformer~\citep{mathur2025self} applies fixed-point
+iteration within a single self-attention layer.
+Inner Thinking Transformer~\citep{chen2025inner} interprets
+depth as internal reasoning steps.
+All existing fixed-point methods refine representations within a
+\textit{fixed} computational structure; RCI differs in that
+convergence is achieved through \textit{expansion} of the active
+module set.
+
+\paragraph{Hardware-efficient sparse operations.}
+Flash-KMeans~\citep{flashkmeans2025} demonstrates that IO-aware
+kernel engineering can yield 30--200$\times$ speedups for sparse
+operations previously considered hardware-unfriendly, suggesting
+a concrete engineering path toward reducing RCI's wall-clock
+overhead without algorithmic changes.
+
+\paragraph{Summary of distinctions.}
+Table~\ref{tab:related} summarises the key distinctions.
+
+\begin{table}[ht]
+\centering
+\caption{Comparison of RCI with related methods.}
+\label{tab:related}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Method & Dyn.\ Depth & Monotonic Width & Conv.\ Stop &
+No Pre-est. & Parallel \\
+\midrule
+ACT / UT / PonderNet & \checkmark & $\times$ &
+$\times$ & $\times$ & $\times$ \\
+Mixture-of-Depths & \checkmark & $\times$ &
+$\times$ & $\times$ & $\times$ \\
+Answer Convergence & \checkmark & $\times$ &
+\checkmark & $\times$ & $\times$ \\
+Switch / OLMoE & $\times$ & $\times$ &
+$\times$ & $\times$ & $\times$ \\
+SELF-Transformer & \checkmark & $\times$ &
+\checkmark & \checkmark & $\times$ \\
+Best-of-$N$ / MCTS & $\times$ & $\times$ &
+ext.\ budget & $\times$ & $\times$ \\
+\midrule
+\textbf{RCI (ours)} & \checkmark & \checkmark &
+\checkmark & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% ── 3. METHOD ─────────────────────────────────────────────
+\section{Recursive Convergent Inference}
+\label{sec:method}
+
+\subsection{Core Principle}
+
+RCI formulates inference as monotonic module-set expansion until
+empirical output convergence.
+In contrast to existing top-down adaptive methods, RCI operates
+bottom-up: computation begins at a minimal seed subset and grows
+as warranted by the task.
+
+\subsection{Seed Initialisation}
+
+Seeds define the initial subset of active computational modules.
+In the PoC, seeds are initialised as the top-8 most frequently
+activated experts on the first standard forward pass.
+In the full architecture, a lightweight input classifier
+(embedding + linear router) maps task type to domain-specific
+module clusters, trained with an auxiliary loss including
+$\lambda_4 \cdot \mathrm{Var}(M_{\mathrm{active}})$ to encourage
+distinct subgraph activation across task types.
+
+\subsection{Recursive Expansion}
+
+The affinity graph encodes co-activation frequency between modules:
+
+\[
+\mathrm{affinity}[i][j] \mathrel{+}= 1
+\;\text{ if experts } i,j
+\text{ are co-activated within the same sequence.}
+\]
+
+The expansion rule is:
+\begin{align}
+M_0 &= \text{seeds} \\
+M_{n+1} &= M_n \cup
+\mathrm{top\text{-}k}\!\left(\mathrm{neighbors}(M_n),\,
+\mathrm{weighted\ by\ affinity}\right),
+\quad M_n \subseteq M_{n+1}
+\end{align}
+
+Implementation proceeds via a gating mask:
+\begin{lstlisting}[language=Python]
+gating_logits[experts_not_in_M] = -inf
+current_k = min(base_k * (2 ** step), total_experts)
+\end{lstlisting}
+
+\subsection{Convergence Criterion}
+
+\begin{equation}
+\Delta_n = \alpha \cdot \mathrm{KL}(P_n \,\|\, P_{n-1})
++ \beta \cdot \cos(h_n, h_{n-1})
++ \gamma \cdot H(P_n)
+\end{equation}
+
+\begin{equation}
+\text{Convergence: } \frac{1}{W}\sum_{i=n-W+1}^{n}\Delta_i
+< \varepsilon \;\;\text{and}\;\;
+\bigl[P(\text{top-1}) - P(\text{top-2})\bigr] \geq \theta
+\end{equation}
+
+The Confidence Margin guards against false convergence at local
+plateaus without requiring an external estimator.
+
+\subsection{Training Objective}
+
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{\mathrm{task}}
++ \lambda_1 \mathcal{L}_{\mathrm{conv}}
++ \lambda_2 \mathcal{L}_{\mathrm{sparse}}
++ \lambda_3 \,\mathrm{MI}(\mathrm{seeds},\,M_{\mathrm{final}})
++ \lambda_4 \,\mathrm{Var}(M_{\mathrm{active}})
+\label{eq:loss}
+\end{equation}
+
+% ── 4. EXPERIMENTS ────────────────────────────────────────
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+
+\paragraph{Model.}
+OLMoE-1B-7B-0924~\citep{muennighoff2024olmoe}: 64 experts per
+MoE layer, top-8 routing, 1B active / 7B total parameters,
+Apache 2.0 licence.
+All experiments on a single NVIDIA T4 GPU (16 GB) via Google
+Colab.
+
+\paragraph{Affinity graph.}
+500 calibration examples from C4~\citep{raffel2020c4}.
+Co-activation counts are L$_\infty$-normalised to $[0,1]$.
+Construction requires approximately 10 minutes on T4.
+
+\paragraph{RCI loop.}
+Seeds: top-8 most activated experts on first pass.
+Expansion: BFS over affinity graph, $k{=}4$ neighbours per step.
+Gating: dynamic top-$k$ doubling ($8{\to}16{\to}32{\to}64$).
+Convergence: $\varepsilon{=}0.093$ (calibrated as the 20th
+percentile of KL values over 5 calibration tasks),
+$W{=}3$, max steps $= 15$.
+
+\paragraph{Benchmarks.}
+\begin{itemize}
+    \item \textbf{Easy}: GSM8K~\citep{cobbe2021gsm8k} ---
+    grade school mathematics word problems
+    \item \textbf{Medium}: MATH algebra~\citep{hendrycks2021math}
+    \item \textbf{Hard}: MMLU hard subsets~\citep{hendrycks2021mmlu}
+    --- college physics, chemistry, abstract algebra, formal logic
+\end{itemize}
+50 examples per tier, $n{=}150$ total.
+
+\subsection{Results}
+
+\begin{table}[ht]
+\centering
+\caption{Cumulative KL divergence (AUC) by difficulty tier
+($n{=}150$, 50 per tier).}
+\label{tab:results}
+\begin{tabular}{llccc}
+\toprule
+Difficulty & Benchmark & $n$ & Mean AUC & Std \\
+\midrule
+Easy & GSM8K & 50 & 10.728 & 2.808 \\
+Medium & MATH (algebra) & 50 & 8.956 & 1.688 \\
+Hard & MMLU hard & 50 & 11.987 & 2.537 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+All pairwise Mann-Whitney U tests are statistically significant:
+hard vs.\ easy ($U{=}1677$, $p{=}0.002$),
+hard vs.\ medium ($U{=}2106$, $p{<}0.001$),
+easy vs.\ medium ($U{=}1788$, $p{<}0.001$).
+The overall Spearman rank correlation is
+$\rho{=}0.22$ ($p{=}0.007$, $n{=}150$).
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\textwidth]{rci_figure1.png}
+\caption{%
+\textbf{Left:} Cumulative KL divergence (AUC) per difficulty
+tier; horizontal bars indicate group means.
+\textbf{Centre:} Active expert coverage (\%) per task.
+\textbf{Right:} Representative KL convergence curves;
+dashed line indicates $\varepsilon{=}0.093$.}
+\label{fig:results}
+\end{figure}
+
+\subsection{Model-Relative Complexity}
+
+A notable finding is that MATH algebra problems (human label:
+medium) require less cumulative KL divergence than GSM8K word
+problems (human label: easy) for this model
+($8.96$ vs.\ $10.73$, $p{<}0.001$).
+We interpret this as evidence that RCI measures
+\textbf{model-relative computational demand}---the amount of
+information a specific model must extract from its own weight
+structure to stabilise its output distribution on a specific
+input---rather than task difficulty in the abstract.
+This dissociation between model-internal and human-perceived
+difficulty warrants further investigation across model families
+and scales.
+
+\subsection{Ablation}
+
+Affinity-weighted BFS and random BFS yield equivalent average
+steps on this pre-trained model without RCI-specific fine-tuning.
+This is consistent with the hypothesis that the full benefit of
+structured expansion requires training under the objective in
+Equation~\ref{eq:loss}.
+
+% ── 5. LIMITATIONS ────────────────────────────────────────
+\section{Limitations and Future Work}
+\label{sec:limitations}
+
+\paragraph{Wall-clock latency.}
+Each RCI step is a full forward pass; real-world speedup requires
+fused sparse kernels.
+Recent IO-aware GPU primitives~\citep{flashkmeans2025} suggest
+this overhead may be substantially reducible without algorithmic
+changes.
+
+\paragraph{Scale.}
+The PoC uses 1B active parameters.
+Behaviour at 8B--70B scale remains unexamined.
+
+\paragraph{Static affinity graph.}
+Computed offline over 500 calibration examples; may be suboptimal
+under distribution shift.
+Dynamic affinity estimation is a natural extension.
+
+\paragraph{Parallel heads.}
+Multi-head parallelism requires multi-device infrastructure and
+is not evaluated in the present PoC.
+
+\paragraph{Convergence guarantees.}
+RCI relies on empirical convergence.
+Formal guarantees via contraction mapping are not pursued.
+
+\paragraph{Future directions.}
+(i) Attention-based pooling to mitigate oversmoothing at high
+module coverage;
+(ii) training from scratch under the full RCI objective;
+(iii) validation across MoE families (Mixtral, Qwen-MoE,
+DeepSeek-MoE);
+(iv) extension to multi-modal architectures.
+
+% ── 6. CONCLUSION ─────────────────────────────────────────
+\section{Conclusion}
+\label{sec:conclusion}
+
+We introduced Recursive Convergent Inference (RCI), an inference
+principle in which the set of active computational modules expands
+monotonically from a minimal seed subset until empirical
+convergence of the model's next-token output distribution.
+In contrast to existing adaptive computation methods that operate
+top-down---starting from a maximal graph and learning when to
+halt---RCI operates bottom-up, growing computation as warranted
+by the task rather than pruning it post-hoc.
+Stopping requires no learned halting signal, external verifier,
+or task-complexity pre-estimator; it emerges directly from the
+distributional stability of the model's own output.
+
+We instantiated RCI on OLMoE-1B-7B-0924, a fully open
+mixture-of-experts model with 64 discrete experts, and provided
+a reproducible implementation via Google Colab.
+Empirical evaluation across reasoning benchmarks (GSM8K, MATH
+algebra, MMLU hard subsets, $n{=}150$, 50 per tier) reveals two
+findings.
+First, all pairwise difficulty comparisons are statistically
+significant: hard tasks accumulate significantly greater
+cumulative KL divergence than easy ($U{=}1677$, $p{=}0.002$) and
+medium tasks ($U{=}2106$, $p{<}0.001$), with a statistically
+significant monotonic correlation overall
+(Spearman $\rho{=}0.22$, $p{=}0.007$, $n{=}150$).
+Second, and notably, RCI's complexity metric diverges from
+human-defined difficulty labels: MATH algebra problems require
+less cumulative KL divergence than GSM8K word problems for this
+model ($8.96$ vs.\ $10.73$, $p{<}0.001$), suggesting an
+intriguing dissociation between model-internal and
+human-perceived difficulty that warrants further study across
+architectures and scales.
+
+We believe RCI offers a complementary perspective to the growing
+literature on test-time compute scaling: that inference efficiency
+can be achieved not only by generating fewer tokens or selecting
+among multiple samples, but by dynamically allocating computation
+at the level of parameter activation itself.
+
+% ── REFERENCES ────────────────────────────────────────────
+\bibliography{references}
+
+\end{document}
