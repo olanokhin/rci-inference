@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Status](https://img.shields.io/badge/Status-Paper%20%2B%20Colab%20Ready-green.svg)]()
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/[YOUR_NOTEBOOK_LINK])
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1hKGM_matDR-JZb-qk20x2gQ3aYiovhqx?usp=sharing)
 
 > *Stop when the model agrees with itself — not when you tell it to.*
 
@@ -79,7 +79,7 @@ RCI:
 Full implementation released as a Google Colab notebook.  
 All experiments reproducible on free-tier GPU.
 
-**→ [Open in Colab](#)** *(link to be added)*
+**→ [Open in Colab](https://colab.research.google.com/drive/1hKGM_matDR-JZb-qk20x2gQ3aYiovhqx?usp=sharing)**
 
 Model: [OLMoE-1B-7B](https://huggingface.co/allenai/OLMoE-1B-7B) — fully open weights, Apache 2.0.
 
