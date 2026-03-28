@@ -1,0 +1,23 @@
+{
+  "model": "allenai/OLMoE-1B-7B-0924",
+  "n": 150,
+  "eps": 0.093,
+  "stats": {
+    "easy": {
+      "mean": 10.728,
+      "std": 2.808
+    },
+    "medium": {
+      "mean": 8.956,
+      "std": 1.688
+    },
+    "hard": {
+      "mean": 11.987,
+      "std": 2.537
+    }
+  },
+  "spearman": {
+    "rho": 0.221,
+    "p": 0.0066
+  }
+}
