@@ -24,7 +24,7 @@ RCI shifts from **external scaling** (longer outputs, multiple samples, verifier
 
 ## Key Results
 
-Evaluated on **OLMoE-1B-7B** (64 experts) across **n=150** reasoning tasks (50 per difficulty tier):
+Evaluated on **OLMoE-1B-7B-0924** (64 experts) across **n=150** reasoning tasks (50 per difficulty tier):
 
 | Difficulty | Benchmark | n | Avg AUC | Std |
 |:---|:---|:---:|:---:|:---:|
@@ -77,13 +77,19 @@ All experiments reproducible on **free-tier Google Colab T4 GPU** (~60 minutes).
 ---
 
 ## Repository Structure
-
 ```
 rci-inference/
-├── rci_inference_poc.ipynb   # Full experiment notebook
-├── rci_results.json          # Experimental results
-├── rci_figure1.png           # Results figure
-└── README.md
+├── README.md
+├── LICENSE
+├── paper/
+│   └── rci-paper.pdf
+├── experiments/
+│   ├── rci_inference_poc.ipynb
+│   ├── rci_figure1.png
+│   └── rci_results.json
+└── latex/
+    ├── main.tex
+    └── references.bib
 ```
 
 ---
